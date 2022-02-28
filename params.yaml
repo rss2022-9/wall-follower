@@ -1,5 +1,5 @@
 scan_topic: "/scan"
-drive_topic: "/drive"
+drive_topic: "/vesc/ackermann_cmd_mux/input/navigation"
 side: -1 # 1 is left -1 is right
 velocity: 0.5
 desired_distance: 1.
