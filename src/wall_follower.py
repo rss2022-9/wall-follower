@@ -27,7 +27,7 @@ class WallFollower:
     DESIRED_DISTANCE = rospy.get_param("wall_follower/desired_distance")
     WALL_TOPIC = "/wall"
 
-    laser_angle = pi/2 # 5*pi/8 # the range we use to fit a line
+    laser_angle = 5*pi/8 # 5*pi/8 # the range we use to fit a line
     laser_offset = pi/6
 
     vel_max = 4
@@ -41,7 +41,7 @@ class WallFollower:
     last_ack_angle = 0
     Pgain = 1
     Dgain = 5
-
+    thresh = 1.3
     def __init__(self):
         # TODO:
         # Initialize your publishers and subscribers here
@@ -52,25 +52,34 @@ class WallFollower:
 
     # Write your callback functions here.
     def callback(self, msg, pub_list):
+        turn_msg = AckermannDriveStamped()
+
+        
         pub = pub_list[0]
         line_pub = pub_list[1]
         
-        if self.wall_in_front(msg):
+        wall = self.wall_in_front(msg)
+        if wall[1]==True:
+            turn_msg.drive.speed = 0 # safety
+        else:
+            turn_msg.drive.speed = self.VELOCITY
+        
+        if wall[0]==True:
             if self.SIDE == -1: # right wall
                 ack_angle = 0.3 # turn left
             else:
                 ack_angle = -0.3
             print("wall dectected")
         else:
-            k, b = self.find_line(msg, line_pub)
+        
+            k, b = self.find_line_aggr(msg, line_pub)
             # ack_angle = self.LQRcontroller(k, b)
             ack_angle = self.PDController(k, b)
 
         # steer angle: positive left, negative right
-        turn_msg = AckermannDriveStamped()
         turn_msg.header.stamp = rospy.Time.now()
         turn_msg.drive.steering_angle = ack_angle
-        turn_msg.drive.speed = self.VELOCITY
+        #turn_msg.drive.speed = self.VELOCITY
         turn_msg.drive.acceleration = 0.1
         pub.publish(turn_msg)       
 
@@ -124,13 +133,18 @@ class WallFollower:
         middle= int(laserpt_num/2)
         angle_front = angle_list[middle-split:middle+split]
         dist_sum    = np.cos(angle_front)*msg.ranges[middle-split:middle+split]
-        if sum(dist_sum)/(2*split+1) < self.DESIRED_DISTANCE+self.wheel_base*3:
-            return True
+        
+        
+        if sum(dist_sum)/(2*split+1) < self.wheel_base*1: # a super simple safety controller
+            return [True,True]
+        if sum(dist_sum)/(2*split+1) < self.DESIRED_DISTANCE+self.wheel_base*1.5:
+            return [True,False]
         else:
-            return False
+            return [False,False]
 
     # segment the laser data and fit it into a line and visualize
     # currently only start from the start or the end
+    """
     def find_line(self, msg, line_pub):
         angle_min = msg.angle_min
         angle_max = msg.angle_max
@@ -155,15 +169,33 @@ class WallFollower:
         if self.SIDE == -1: # right wall
             laser_line_fit = msg.ranges[offset:num+offset] # TODO: correspondance check 
             angle = angle_list[offset:num+offset]
+            min_dist = min(laser_line_fit)
+
             x_min = laser_line_fit[0]*np.cos(angle[0])
             x_max = laser_line_fit[-1]*np.cos(angle[-1])
-            polar_coordinate = zip(angle, laser_line_fit)
+            # polar_coordinate = zip(angle, laser_line_fit)
+            polar_coordinate = []
+            for i in range(len(laser_line_fit)):
+                if laser_lin_fit[i] > 0.2 and  laser_lin_fit[i] - min_dist < self.thresh:
+                    polar_coordinate.append(angle[i],laser_lin_fit[i])
+            #polar_coordinate = np.vstack((angle, laser_line_fit))
+            #polar_coordinate_f1 = polar_coordinate[1,:] - min_dist < self.thresh
+            #polar_coordinate_f2 = polar_coordinate_f1[1,:]  > 0.2
+            #print(polar_coordinate_f2.shape)
         elif self.SIDE == 1:
             laser_line_fit = msg.ranges[-num-offset:-offset]
             angle = angle_list[-num-offset:-offset]
+            min_dist = min(laser_line_fit)
             x_max = laser_line_fit[0]*np.cos(angle[0])
             x_min = laser_line_fit[-1]*np.cos(angle[-1])
-            polar_coordinate = zip(angle, laser_line_fit)
+            # polar_coordinate = zip(angle, laser_line_fit)
+            for i in range(len(laser_line_fit)):
+                if laser_lin_fit[i] > 0.2 and  laser_lin_fit[i] - min_dist < self.thresh:
+                    polar_coordinate.append(angle[i],laser_lin_fit[i])
+            #polar_coordinate = np.vstack((angle, laser_line_fit))
+            #polar_coordinate_f1 = polar_coordinate[1,:] - min_dist < self.thresh
+            #polar_coordinate_f2 = polar_coordinate_f1[1,:]  > 0.2
+            #print(polar_coordinate_f2.shape)
         else:
             rospy.loginfo("error: input correct side")
         # strmsg = String()
@@ -191,12 +223,78 @@ class WallFollower:
         VisualizationTools.plot_line(x_marker, y_marker, line_pub, frame="/laser")
 
         return k, b
+"""
+    def find_line_aggr(self, msg, line_pub):
+        angle_min = msg.angle_min
+        angle_max = msg.angle_max
+        angle_increment = msg.angle_increment
+        laserpt_num = len(msg.ranges)
+        angle_list = np.arange(angle_min, angle_max, angle_increment)            
+
+        # get how many number of the points we need
+        rho = []
+        phi = []
+        # use min distance except when min_ind on wrong side
+        half_ind = int((laserpt_num*0.6))
+        if self.SIDE == -1: # right wall
+            laser_line_fit = msg.ranges[:half_ind] # TODO: correspondance check 
+            angle = angle_list[:half_ind]
+            min_dist = min(laser_line_fit)
+            for i in range(len(laser_line_fit)):
+                if laser_line_fit[i] > 0.2 and  laser_line_fit[i] - min_dist < self.thresh:
+                    rho.append(angle[i])
+                    phi.append(laser_line_fit[i])
+            x_min = rho[0]*np.cos(phi[0])
+            x_max = rho[-1]*np.cos(phi[-1])
+            polar_coordinate = zip(rho,phi)
+        elif self.SIDE == 1:
+            laser_line_fit = msg.ranges[-half_ind:]
+            angle = angle_list[-half_ind:]
+            min_dist = min(laser_line_fit)
+            for i in range(len(laser_line_fit)):
+                if laser_line_fit[i] > 0.2 and  laser_line_fit[i] - min_dist < self.thresh:
+                    rho.append(angle[i])
+                    phi.append(laser_line_fit[i])
+            polar_coordinate = zip(rho, phi)
+            x_min = rho[0]*np.cos(phi[0])
+            x_max = rho[-1]*np.cos(phi[-1])
+        else:
+            rospy.loginfo("error: input correct side")
+
+        # strmsg = String()
+        # strmsg.data = "now in normal mode............."
+        # self.debug_pub.publish(strmsg)
+        # else:
+        #     num_half = int(num/2.0)  # min pt in the middle, get the pts around it
+        #     if num_half>min_ind+1:
+        #         num_half = min_ind;
+        #     elif num_half>laserpt_num-1-min_ind:
+        #         num_half = laserpt_num-1-min_ind;
+        #     start_ind= min_ind-num_half
+        #     end_ind  = min_ind+num_half
+        #     x_max = msg.ranges[start_ind]*np.cos(angle_list[start_ind])
+        #     x_min = msg.ranges[end_ind]*np.cos(angle_list[end_ind])
+        #     polar_coordinate = zip(angle_list[start_ind:end_ind], msg.ranges[start_ind:end_ind])
+        #     strmsg = String()
+        #     strmsg.data = "now in min mode"
+        #     self.debug_pub.publish(strmsg)
+        num = len(rho)
+        k, b = self.least_square(polar_coordinate, num)
+
+        x_marker = np.linspace(x_min, x_max, num=20)
+        y_marker = k*x_marker + b
+        VisualizationTools.plot_line(x_marker, y_marker, line_pub, frame="/laser")
+
+        return k, b
+
+
 
     # input polar coordinate wrt laser frame, and fit the line in cartesian space
     def least_square(self, polar_coordinate, count):
         H = np.zeros([count, 2])
         y_col = np.zeros([count, 1])
         counter = 0
+        # polar_coordinate_new = zip(polar_coordinate[0,:], polar_coordinate[1,:])
         for ang, dist in polar_coordinate:
             x = np.cos(ang)*dist
             y = np.sin(ang)*dist
