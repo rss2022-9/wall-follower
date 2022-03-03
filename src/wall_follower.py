@@ -13,7 +13,8 @@ import rospy
 from rospy.numpy_msg import numpy_msg
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
+
 from visualization_tools import *
 
 class WallFollower:
@@ -41,12 +42,13 @@ class WallFollower:
     last_ack_angle = 0
     Pgain = 1
     Dgain = 5
-    thresh = 1.3
+    thresh = 2
     def __init__(self):
         # TODO:
         # Initialize your publishers and subscribers here
         pub = rospy.Publisher(self.DRIVE_TOPIC, AckermannDriveStamped, queue_size=10)
         self.debug_pub = rospy.Publisher("debug", String, queue_size=10)
+        self.error_pub = rospy.Publisher("error", Float32, queue_size=10)
         line_pub = rospy.Publisher(self.WALL_TOPIC, Marker, queue_size=1)
         rospy.Subscriber(self.SCAN_TOPIC, LaserScan, self.callback, (pub, line_pub))
 
@@ -59,28 +61,30 @@ class WallFollower:
         line_pub = pub_list[1]
         
         wall = self.wall_in_front(msg)
-        if wall[1]==True:
-            turn_msg.drive.speed = 0 # safety
-        else:
-            turn_msg.drive.speed = self.VELOCITY
-        
+       
         if wall[0]==True:
             if self.SIDE == -1: # right wall
                 ack_angle = 0.3 # turn left
             else:
                 ack_angle = -0.3
             print("wall dectected")
-        else:
-        
+        else:   
             k, b = self.find_line_aggr(msg, line_pub)
             # ack_angle = self.LQRcontroller(k, b)
             ack_angle = self.PDController(k, b)
+
 
         # steer angle: positive left, negative right
         turn_msg.header.stamp = rospy.Time.now()
         turn_msg.drive.steering_angle = ack_angle
         #turn_msg.drive.speed = self.VELOCITY
         turn_msg.drive.acceleration = 0.1
+        # for the safety controller
+        if wall[1]==True:
+            turn_msg.drive.speed = 0 # safety
+            turn_msg.drive.steering_angle = 0
+        else:
+            turn_msg.drive.speed = self.VELOCITY
         pub.publish(turn_msg)       
 
     def PDController(self, k, b):
@@ -129,15 +133,16 @@ class WallFollower:
         laserpt_num = len(msg.ranges)
         angle_list = np.arange(angle_min, angle_max, angle_increment)
 
-        split = int(laserpt_num/9) # pi/3 in the front to dectect wall
+        split = int(laserpt_num/10) # pi/3 in the front to dectect wall
         middle= int(laserpt_num/2)
         angle_front = angle_list[middle-split:middle+split]
-        dist_sum    = np.cos(angle_front)*msg.ranges[middle-split:middle+split]
+        dist_all  = np.cos(angle_front)*msg.ranges[middle-split:middle+split]
         
         
-        if sum(dist_sum)/(2*split+1) < self.wheel_base*1: # a super simple safety controller
+        if min(dist_all) < self.wheel_base*self.VELOCITY: # a super simple safety controller
+            print(min(dist_all))
             return [True,True]
-        if sum(dist_sum)/(2*split+1) < self.DESIRED_DISTANCE+self.wheel_base*1.5:
+        if min(dist_all) < self.DESIRED_DISTANCE+self.wheel_base*self.VELOCITY:
             return [True,False]
         else:
             return [False,False]
@@ -284,7 +289,10 @@ class WallFollower:
         x_marker = np.linspace(x_min, x_max, num=20)
         y_marker = k*x_marker + b
         VisualizationTools.plot_line(x_marker, y_marker, line_pub, frame="/laser")
-
+        dist = np.abs(b)/np.sqrt(1+k**2)
+        #err_msg = Float32()
+        #err_msg
+        self.error_pub.publish(dist-self.DESIRED_DISTANCE)
         return k, b
 
 
