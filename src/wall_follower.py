@@ -2,6 +2,7 @@
 import numpy as np
 import math
 import rospy
+from std_msgs.msg import Float32
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
 from visualization_tools import *
@@ -15,6 +16,7 @@ class WallFollower:
     VELOCITY = rospy.get_param("wall_follower/velocity")
     DESIRED_DISTANCE = rospy.get_param("wall_follower/desired_distance")
     WALL_TOPIC = "/wall"
+    ERRO_TOPIC = "/error"
 
     t_a = 0.34 # max turning angle
     t_r = 0.75 # max turn radius of center of gravity of car 
@@ -31,35 +33,48 @@ class WallFollower:
         # Initialize your publishers and subscribers here
         self.pub = rospy.Publisher(self.DRIVE_TOPIC, AckermannDriveStamped, queue_size=10)
         self.line_pub = rospy.Publisher(self.WALL_TOPIC, Marker, queue_size=10)
+        self.err_pub = rospy.Publisher('Cur_Error', Float32, queue_size=10)
+        self.count = 0
+        self.toterr = 0
         rospy.Subscriber(self.SCAN_TOPIC, LaserScan, self.callback, (self.pub, self.line_pub))
 
-    # Pure pursuit controller
-    def PPController(self, k, b):
-        d = abs(b/(math.sqrt(1+(k**2)))) - self.DESIRED_DISTANCE
-        ang = max(min(1.0,d/self.L1),-1.0)
-        n1 = np.arcsin(ang)
-        n2 = self.SIDE*np.arctan(k)
-        n = n1 + n2
-        ackman_ang = np.arctan((2*self.w_b*np.sin(n))/self.L1)
-        return self.SIDE*ackman_ang
+    # Callback function
+    def callback(self, msg, pub_list):
+        turn_msg = AckermannDriveStamped()
+        pub = pub_list[0]
+        line_pub = pub_list[1]
 
-    # Safety controller
-    def safety(self, ranges, angles):
-        tr = self.t_r 
-        sw = self.s_w/2.0
-        s = -self.SIDE
-        s_ranges, s_angles = self.select_data(ranges,angles,self.front,1)
+        # rad and angle values for polar coordinates of laser data
+        angle_min = msg.angle_min
+        angle_max = msg.angle_max
+        angle_increment = msg.angle_increment
+        ranges = msg.ranges
+        angles = np.arange(angle_min, angle_max, angle_increment)
+        
+        # Find line then Pure Pursuit Controller 
+        #k, b = self.find_line(ranges, angles)
+        k, b = self.find_line(ranges, angles,1) # uncomment to publish line of wall
+        ack_angle = self.PPController(k, b)
 
-        polar_coordinate = zip(s_ranges,s_angles)
-        for rho,phi in polar_coordinate:
-            if rho < tr:
-                x = rho*np.cos(phi)
-                y = rho*np.sin(phi)
-                out_circle = ((x+(s*tr))**2) + y**2 < ((tr+sw)**2)
-                inn_circle = ((x+(s*tr))**2) + y**2 > ((tr-sw)**2)
-                if out_circle and inn_circle:
-                    return True
-        return False
+        #Safety Controller
+        stop = self.safety(ranges, angles) 
+
+        #turn_msg publishing
+        turn_msg.header.stamp = rospy.Time.now()
+        turn_msg.drive.speed = 0 if stop else self.VELOCITY
+        turn_msg.drive.steering_angle = ack_angle
+        pub.publish(turn_msg)      
+
+    # error recording
+    def rec_error(self, error):
+        cur_error = abs(error)
+        a = 0.6
+        self.count += 1.0
+        score = 1/(1+(a*cur_error)**2)
+        self.toterr += score
+        error = self.toterr/self.count
+        self.err_pub.publish(error)
+        return error
 
     # Select laser data with left fraction and right fraction or
     # Set selection type to 1 to select with offset and split range
@@ -69,8 +84,8 @@ class WallFollower:
         high_ind = length - 1
 
         if sel_type == 0:
-        	start_ind = int(min(length*(left), high_ind))
-        	end_ind = int(min(length*(right),high_ind))
+            start_ind = int(min(length*(left), high_ind))
+            end_ind = int(min(length*(right),high_ind))
         elif sel_type == 1:
             start_ind = int(min(length*(offset-split), high_ind))
             end_ind = int(min(length*(offset+split),high_ind))
@@ -97,6 +112,36 @@ class WallFollower:
         RHS = np.dot(H.T, y_col)
         param = np.dot(np.linalg.pinv(LHS), RHS)
         return param[0], param[1]  # k, b
+
+    # Safety controller
+    def safety(self, ranges, angles):
+        tr = self.t_r 
+        sw = self.s_w/2.0
+        s = -self.SIDE
+        s_ranges, s_angles = self.select_data(ranges,angles,self.front,1)
+
+        polar_coordinate = zip(s_ranges,s_angles)
+        for rho,phi in polar_coordinate:
+            if rho < tr:
+                x = rho*np.cos(phi)
+                y = rho*np.sin(phi)
+                out_circle = ((x+(s*tr))**2) + y**2 < ((tr+sw)**2)
+                inn_circle = ((x+(s*tr))**2) + y**2 > ((tr-sw)**2)
+                if out_circle and inn_circle:
+                    return True
+        return False
+
+    # Pure pursuit controller
+    def PPController(self, k, b):
+        d = abs(b/(math.sqrt(1+(k**2)))) - self.DESIRED_DISTANCE
+        ang = max(min(1.0,d/self.L1),-1.0)
+        n1 = np.arcsin(ang)
+        n2 = self.SIDE*np.arctan(k)
+        n = n1 + n2
+        #self.rec_error(d)
+        print(self.rec_error(d))
+        ackman_ang = np.arctan((2*self.w_b*np.sin(n))/self.L1)
+        return self.SIDE*ackman_ang
 
     # Find line of data using right and left tuples at the top
     # Change max_thresh to change how far ahead the car looks for more points to fit
@@ -131,32 +176,7 @@ class WallFollower:
 
         return k, b
 
-    # Callback function
-    def callback(self, msg, pub_list):
-        turn_msg = AckermannDriveStamped()
-        pub = pub_list[0]
-        line_pub = pub_list[1]
-
-        # rad and angle values for polar coordinates of laser data
-        angle_min = msg.angle_min
-        angle_max = msg.angle_max
-        angle_increment = msg.angle_increment
-        ranges = msg.ranges
-        angles = np.arange(angle_min, angle_max, angle_increment)
-        
-        # Find line then Pure Pursuit Controller 
-        #k, b = self.find_line(ranges, angles)
-        k, b = self.find_line(ranges, angles,1) # uncomment to publish line of wall
-        ack_angle = self.PPController(k, b)
-
-        #Safety Controller
-        stop = self.safety(ranges, angles) 
-
-        #turn_msg publishing
-        turn_msg.header.stamp = rospy.Time.now()
-        turn_msg.drive.speed = 0 if stop else self.VELOCITY
-        turn_msg.drive.steering_angle = ack_angle
-        pub.publish(turn_msg)       
+     
         
 if __name__ == "__main__":
     rospy.init_node('wall_follower')
