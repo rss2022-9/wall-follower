@@ -29,6 +29,11 @@ class WallFollower:
     left = (1.0-right[1],1.0-right[0]) # start and end fraction for selection of lidar data for left side of car mirrior rights selection
     s_w = 0.5 # width of safety space 0.5 default wider than that is safer
 
+    #Linearized Pursuit PD controls
+    VLratio = VELOCITY/L1
+    err_y_last = 0
+    Pgain = 3
+    Dgain = 2
     def __init__(self):
         # Initialize your publishers and subscribers here
         self.pub = rospy.Publisher(self.DRIVE_TOPIC, AckermannDriveStamped, queue_size=10)
@@ -55,6 +60,7 @@ class WallFollower:
         #k, b = self.find_line(ranges, angles)
         k, b = self.find_line(ranges, angles,1) # uncomment to publish line of wall
         ack_angle = self.PPController(k, b)
+        #ack_angle = self.PDController(k, b)
 
         #Safety Controller
         stop = self.safety(ranges, angles) 
@@ -140,6 +146,15 @@ class WallFollower:
         n = n1 + n2
         #self.rec_error(d)
         print(self.rec_error(d))
+        ackman_ang = np.arctan((2*self.w_b*np.sin(n))/self.L1)
+        return self.SIDE*ackman_ang
+
+    def PDController(self, k, b):
+        d = abs(b/(math.sqrt(1+(k**2)))) - self.DESIRED_DISTANCE
+        err_dy = d - self.err_y_last
+        n1 = self.Pgain*(d/self.L1)
+        n2 = self.Dgain*(err_dy/self.VELOCITY)
+        n = n1 + n2
         ackman_ang = np.arctan((2*self.w_b*np.sin(n))/self.L1)
         return self.SIDE*ackman_ang
 
